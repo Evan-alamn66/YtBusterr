@@ -1,0 +1,532 @@
+import React, { useState, useEffect, createContext, useContext } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, collection, addDoc, getDocs, onSnapshot, doc, updateDoc, deleteDoc, query, orderBy, limit } from 'firebase/firestore';
+
+// Context for Firebase and User data
+const FirebaseContext = createContext(null);
+
+// Main App Component
+function App() {
+  const [db, setDb] = useState(null);
+  const [auth, setAuth] = useState(null);
+  const [userId, setUserId] = useState(null);
+  const [isAuthReady, setIsAuthReady] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false); // State to control admin view
+  const [adminKeyInput, setAdminKeyInput] = useState('');
+  const ADMIN_KEY = '561423'; // Hardcoded admin key
+
+  // Initialize Firebase and set up auth listener
+  useEffect(() => {
+    try {
+      const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+      const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+
+      if (Object.keys(firebaseConfig).length === 0) {
+        console.error("Firebase config is missing. Please ensure __firebase_config is set.");
+        return;
+      }
+
+      const app = initializeApp(firebaseConfig);
+      const firestoreDb = getFirestore(app);
+      const firebaseAuth = getAuth(app);
+
+      setDb(firestoreDb);
+      setAuth(firebaseAuth);
+
+      const unsubscribe = onAuthStateChanged(firebaseAuth, async (user) => {
+        if (user) {
+          setUserId(user.uid);
+        } else {
+          // Sign in anonymously if no user is found or initial token is not available
+          try {
+            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+              await signInWithCustomToken(firebaseAuth, __initial_auth_token);
+            } else {
+              await signInAnonymously(firebaseAuth);
+            }
+          } catch (error) {
+            console.error("Error during anonymous sign-in or custom token sign-in:", error);
+          }
+        }
+        setIsAuthReady(true);
+      });
+
+      return () => unsubscribe(); // Cleanup auth listener on unmount
+    } catch (error) {
+      console.error("Failed to initialize Firebase:", error);
+    }
+  }, []);
+
+  // Handle admin key submission
+  const handleAdminLogin = () => {
+    if (adminKeyInput === ADMIN_KEY) {
+      setIsAdmin(true);
+      alert('Admin access granted!'); // Using alert for simplicity, consider a custom modal
+    } else {
+      alert('Incorrect Admin Key!'); // Using alert for simplicity, consider a custom modal
+    }
+  };
+
+  if (!isAuthReady) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-900 text-white">
+        <div className="text-xl font-semibold">Loading YTBUSTER...</div>
+      </div>
+    );
+  }
+
+  return (
+    <FirebaseContext.Provider value={{ db, auth, userId, isAuthReady }}>
+      <div className="min-h-screen bg-gray-900 text-white font-inter">
+        <header className="bg-gray-800 p-4 shadow-lg">
+          <h1 className="text-3xl font-bold text-center text-indigo-400">YTBUSTER</h1>
+          <p className="text-center text-sm text-gray-400 mt-1">Your hub for short films!</p>
+          <div className="text-center text-xs text-gray-500 mt-2">
+            User ID: {userId || 'N/A'}
+          </div>
+        </header>
+
+        <main className="container mx-auto p-4">
+          {!isAdmin && (
+            <div className="mb-8 p-6 bg-gray-800 rounded-lg shadow-md flex flex-col items-center">
+              <h2 className="text-2xl font-semibold text-indigo-300 mb-4">Admin Login</h2>
+              <div className="flex items-center space-x-2 w-full max-w-md">
+                <input
+                  type="password"
+                  placeholder="Enter Admin Key"
+                  value={adminKeyInput}
+                  onChange={(e) => setAdminKeyInput(e.target.value)}
+                  className="flex-grow p-3 rounded-md bg-gray-700 border border-gray-600 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                />
+                <button
+                  onClick={handleAdminLogin}
+                  className="px-6 py-3 bg-indigo-600 text-white font-semibold rounded-md hover:bg-indigo-700 transition duration-300 ease-in-out shadow-lg"
+                >
+                  Login
+                </button>
+              </div>
+            </div>
+          )}
+
+          {isAdmin ? <AdminPanel /> : <PublicView />}
+        </main>
+      </div>
+    </FirebaseContext.Provider>
+  );
+}
+
+// Public View Component
+function PublicView() {
+  const { db, isAuthReady } = useContext(FirebaseContext);
+  const [shortFilms, setShortFilms] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    if (!db || !isAuthReady) return;
+
+    const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+    const shortFilmsCollectionRef = collection(db, `artifacts/${appId}/public/data/shortFilms`);
+
+    const unsubscribe = onSnapshot(shortFilmsCollectionRef,
+      (snapshot) => {
+        const filmsData = snapshot.docs.map(doc => ({
+          id: doc.id,
+          ...doc.data()
+        }));
+        // Sort by timestamp if available, otherwise by title
+        filmsData.sort((a, b) => (b.timestamp?.toDate() || 0) - (a.timestamp?.toDate() || 0));
+        setShortFilms(filmsData);
+        setLoading(false);
+      },
+      (err) => {
+        console.error("Error fetching short films:", err);
+        setError("Failed to load short films. Please try again later.");
+        setLoading(false);
+      }
+    );
+
+    return () => unsubscribe(); // Cleanup listener
+  }, [db, isAuthReady]);
+
+  if (loading) {
+    return <div className="text-center text-xl text-gray-400">Loading short films...</div>;
+  }
+
+  if (error) {
+    return <div className="text-center text-xl text-red-500">{error}</div>;
+  }
+
+  return (
+    <section className="py-8">
+      <h2 className="text-3xl font-bold text-center text-indigo-400 mb-8">Featured Short Films</h2>
+      {shortFilms.length === 0 ? (
+        <p className="text-center text-gray-400 text-lg">No short films posted yet. Check back soon!</p>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+          {shortFilms.map(film => (
+            <ShortFilmCard key={film.id} film={film} />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+// Short Film Card Component
+function ShortFilmCard({ film }) {
+  const placeholderImage = `https://placehold.co/400x225/334155/E2E8F0?text=No+Cover`; // Tailwind slate-700 / slate-200
+
+  return (
+    <div className="bg-gray-800 rounded-lg shadow-xl overflow-hidden transform hover:scale-105 transition-transform duration-300 ease-in-out">
+      <img
+        src={film.coverImage || placeholderImage}
+        alt={film.title}
+        className="w-full h-48 object-cover"
+        onError={(e) => { e.target.onerror = null; e.target.src = placeholderImage; }}
+      />
+      <div className="p-6">
+        <h3 className="text-xl font-semibold text-indigo-300 mb-2">{film.title}</h3>
+        <p className="text-gray-400 text-sm mb-4">Views: {film.views ? film.views.toLocaleString() : 'N/A'}</p>
+        <div className="flex flex-wrap gap-3">
+          {film.youtubeLink && (
+            <a
+              href={film.youtubeLink}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center px-4 py-2 bg-red-600 text-white text-sm font-medium rounded-md hover:bg-red-700 transition duration-300 ease-in-out shadow-md"
+            >
+              <svg className="w-4 h-4 mr-2" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clipRule="evenodd"></path>
+              </svg>
+              Watch Film
+            </a>
+          )}
+          {film.trailerLink && (
+            <a
+              href={film.trailerLink}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-md hover:bg-blue-700 transition duration-300 ease-in-out shadow-md"
+            >
+              <svg className="w-4 h-4 mr-2" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+                <path d="M2 6a2 2 0 012-2h12a2 2 0 012 2v8a2 2 0 01-2 2H4a2 2 0 01-2-2V6zM14.553 10.03L17 7.71V12.29L14.553 9.97c-.159-.157-.159-.407 0-.564z"></path>
+              </svg>
+              Trailer
+            </a>
+          )}
+          {film.imdbLink && (
+            <a
+              href={film.imdbLink}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center px-4 py-2 bg-yellow-600 text-white text-sm font-medium rounded-md hover:bg-yellow-700 transition duration-300 ease-in-out shadow-md"
+            >
+              <svg className="w-4 h-4 mr-2" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm-1-12a1 1 0 10-2 0v4a1 1 0 00.293.707l2 2a1 1 0 001.414-1.414L10 9.586V6z" clipRule="evenodd"></path>
+              </svg>
+              IMDb
+            </a>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Admin Panel Component
+function AdminPanel() {
+  const { db, isAuthReady, userId } = useContext(FirebaseContext);
+  const [shortFilms, setShortFilms] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  const [formData, setFormData] = useState({
+    id: null, // For editing existing films
+    title: '',
+    youtubeLink: '',
+    trailerLink: '',
+    imdbLink: '',
+    coverImage: '',
+    views: 0,
+  });
+
+  // Fetch short films for admin panel
+  useEffect(() => {
+    if (!db || !isAuthReady || !userId) return;
+
+    const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+    // Use public collection path as defined in the security rules
+    const shortFilmsCollectionRef = collection(db, `artifacts/${appId}/public/data/shortFilms`);
+
+    const unsubscribe = onSnapshot(shortFilmsCollectionRef,
+      (snapshot) => {
+        const filmsData = snapshot.docs.map(doc => ({
+          id: doc.id,
+          ...doc.data()
+        }));
+        // Sort by timestamp for consistent order in admin panel
+        filmsData.sort((a, b) => (b.timestamp?.toDate() || 0) - (a.timestamp?.toDate() || 0));
+        setShortFilms(filmsData);
+        setLoading(false);
+      },
+      (err) => {
+        console.error("Error fetching short films for admin:", err);
+        setError("Failed to load short films for admin. Please try again later.");
+        setLoading(false);
+      }
+    );
+
+    return () => unsubscribe();
+  }, [db, isAuthReady, userId]);
+
+  const handleChange = (e) => {
+    const { name, value } = e.target;
+    setFormData(prev => ({
+      ...prev,
+      [name]: name === 'views' ? Number(value) : value,
+    }));
+  };
+
+  const resetForm = () => {
+    setFormData({
+      id: null,
+      title: '',
+      youtubeLink: '',
+      trailerLink: '',
+      imdbLink: '',
+      coverImage: '',
+      views: 0,
+    });
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!db) {
+      alert('Firestore not initialized.');
+      return;
+    }
+
+    const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+    const shortFilmsCollectionRef = collection(db, `artifacts/${appId}/public/data/shortFilms`);
+
+    try {
+      if (formData.id) {
+        // Update existing film
+        const filmRef = doc(db, `artifacts/${appId}/public/data/shortFilms`, formData.id);
+        await updateDoc(filmRef, {
+          title: formData.title,
+          youtubeLink: formData.youtubeLink,
+          trailerLink: formData.trailerLink,
+          imdbLink: formData.imdbLink,
+          coverImage: formData.coverImage,
+          views: formData.views,
+        });
+        alert('Short film updated successfully!');
+      } else {
+        // Add new film
+        await addDoc(shortFilmsCollectionRef, {
+          title: formData.title,
+          youtubeLink: formData.youtubeLink,
+          trailerLink: formData.trailerLink,
+          imdbLink: formData.imdbLink,
+          coverImage: formData.coverImage,
+          views: formData.views,
+          timestamp: new Date(), // Add timestamp for ordering
+        });
+        alert('Short film added successfully!');
+      }
+      resetForm();
+    } catch (err) {
+      console.error("Error saving short film:", err);
+      alert(`Failed to save short film: ${err.message}`);
+    }
+  };
+
+  const handleEdit = (film) => {
+    setFormData({
+      id: film.id,
+      title: film.title,
+      youtubeLink: film.youtubeLink,
+      trailerLink: film.trailerLink,
+      imdbLink: film.imdbLink,
+      coverImage: film.coverImage,
+      views: film.views || 0,
+    });
+  };
+
+  const handleDelete = async (id) => {
+    if (!db) {
+      alert('Firestore not initialized.');
+      return;
+    }
+
+    // Using a simple custom confirmation instead of window.confirm
+    const confirmDelete = window.confirm("Are you sure you want to delete this short film?"); // This is a temporary workaround. For production, use a custom modal.
+    if (!confirmDelete) return;
+
+    const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+    try {
+      await deleteDoc(doc(db, `artifacts/${appId}/public/data/shortFilms`, id));
+      alert('Short film deleted successfully!');
+      resetForm(); // Clear form if the deleted item was being edited
+    } catch (err) {
+      console.error("Error deleting short film:", err);
+      alert(`Failed to delete short film: ${err.message}`);
+    }
+  };
+
+  if (loading) {
+    return <div className="text-center text-xl text-gray-400">Loading admin data...</div>;
+  }
+
+  if (error) {
+    return <div className="text-center text-xl text-red-500">{error}</div>;
+  }
+
+  return (
+    <section className="py-8">
+      <h2 className="text-3xl font-bold text-center text-indigo-400 mb-8">Admin Panel</h2>
+
+      <div className="bg-gray-800 p-6 rounded-lg shadow-md mb-8">
+        <h3 className="text-2xl font-semibold text-indigo-300 mb-4">{formData.id ? 'Edit Short Film' : 'Add New Short Film'}</h3>
+        <form onSubmit={handleSubmit} className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="col-span-1">
+            <label htmlFor="title" className="block text-gray-300 text-sm font-bold mb-2">Title:</label>
+            <input
+              type="text"
+              id="title"
+              name="title"
+              value={formData.title}
+              onChange={handleChange}
+              className="shadow appearance-none border border-gray-600 rounded-md w-full py-2 px-3 bg-gray-700 text-white leading-tight focus:outline-none focus:shadow-outline focus:border-indigo-500"
+              required
+            />
+          </div>
+          <div className="col-span-1">
+            <label htmlFor="youtubeLink" className="block text-gray-300 text-sm font-bold mb-2">YouTube Link:</label>
+            <input
+              type="url"
+              id="youtubeLink"
+              name="youtubeLink"
+              value={formData.youtubeLink}
+              onChange={handleChange}
+              className="shadow appearance-none border border-gray-600 rounded-md w-full py-2 px-3 bg-gray-700 text-white leading-tight focus:outline-none focus:shadow-outline focus:border-indigo-500"
+              required
+            />
+          </div>
+          <div className="col-span-1">
+            <label htmlFor="trailerLink" className="block text-gray-300 text-sm font-bold mb-2">Trailer Link (Optional):</label>
+            <input
+              type="url"
+              id="trailerLink"
+              name="trailerLink"
+              value={formData.trailerLink}
+              onChange={handleChange}
+              className="shadow appearance-none border border-gray-600 rounded-md w-full py-2 px-3 bg-gray-700 text-white leading-tight focus:outline-none focus:shadow-outline focus:border-indigo-500"
+            />
+          </div>
+          <div className="col-span-1">
+            <label htmlFor="imdbLink" className="block text-gray-300 text-sm font-bold mb-2">IMDb Link (Optional):</label>
+            <input
+              type="url"
+              id="imdbLink"
+              name="imdbLink"
+              value={formData.imdbLink}
+              onChange={handleChange}
+              className="shadow appearance-none border border-gray-600 rounded-md w-full py-2 px-3 bg-gray-700 text-white leading-tight focus:outline-none focus:shadow-outline focus:border-indigo-500"
+            />
+          </div>
+          <div className="col-span-1">
+            <label htmlFor="coverImage" className="block text-gray-300 text-sm font-bold mb-2">Cover Image URL:</label>
+            <input
+              type="url"
+              id="coverImage"
+              name="coverImage"
+              value={formData.coverImage}
+              onChange={handleChange}
+              className="shadow appearance-none border border-gray-600 rounded-md w-full py-2 px-3 bg-gray-700 text-white leading-tight focus:outline-none focus:shadow-outline focus:border-indigo-500"
+              required
+            />
+          </div>
+          <div className="col-span-1">
+            <label htmlFor="views" className="block text-gray-300 text-sm font-bold mb-2">Views:</label>
+            <input
+              type="number"
+              id="views"
+              name="views"
+              value={formData.views}
+              onChange={handleChange}
+              className="shadow appearance-none border border-gray-600 rounded-md w-full py-2 px-3 bg-gray-700 text-white leading-tight focus:outline-none focus:shadow-outline focus:border-indigo-500"
+              min="0"
+              required
+            />
+          </div>
+          <div className="col-span-full flex justify-end space-x-4 mt-4">
+            <button
+              type="submit"
+              className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-6 rounded-md focus:outline-none focus:shadow-outline transition duration-300 ease-in-out shadow-lg"
+            >
+              {formData.id ? 'Update Film' : 'Add Film'}
+            </button>
+            <button
+              type="button"
+              onClick={resetForm}
+              className="bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-6 rounded-md focus:outline-none focus:shadow-outline transition duration-300 ease-in-out shadow-lg"
+            >
+              Clear Form
+            </button>
+          </div>
+        </form>
+      </div>
+
+      <div className="bg-gray-800 p-6 rounded-lg shadow-md">
+        <h3 className="text-2xl font-semibold text-indigo-300 mb-4">Manage Short Films</h3>
+        {shortFilms.length === 0 ? (
+          <p className="text-gray-400 text-lg">No short films to manage.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="min-w-full divide-y divide-gray-700">
+              <thead className="bg-gray-700">
+                <tr>
+                  <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider rounded-tl-md">Title</th>
+                  <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Views</th>
+                  <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">YouTube Link</th>
+                  <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="bg-gray-800 divide-y divide-gray-700">
+                {shortFilms.map((film) => (
+                  <tr key={film.id} className="hover:bg-gray-700 transition duration-150 ease-in-out">
+                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-white">{film.title}</td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-300">{film.views ? film.views.toLocaleString() : 'N/A'}</td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-blue-400">
+                      <a href={film.youtubeLink} target="_blank" rel="noopener noreferrer" className="hover:underline">Link</a>
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                      <button
+                        onClick={() => handleEdit(film)}
+                        className="text-indigo-400 hover:text-indigo-600 mr-3 transition duration-150 ease-in-out"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        onClick={() => handleDelete(film.id)}
+                        className="text-red-400 hover:text-red-600 transition duration-150 ease-in-out"
+                      >
+                        Delete
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+export default App;
